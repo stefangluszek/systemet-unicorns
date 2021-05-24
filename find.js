@@ -1,5 +1,5 @@
-const https = require('https');
 const querystring = require('querystring');
+const https = require('https');
 const zlib = require('zlib');
 
 const searchPrefix = '/sb-api-ecommerce/v1/productsearch/search?';
@@ -11,7 +11,6 @@ const categoryLevel1 = args[1];
 const categoryLevel2 = args[2];
 const unicornLevel = args[3];
 const apiKey = args[4];
-
 
 const defaultOpts = {
     hostname: 'api-extern.systembolaget.se',
@@ -25,26 +24,17 @@ const defaultOpts = {
     timeout: 3000,
 };
 
-function getStockPromise(productId) {
-    const opts = {
-        path: getStockPrefix + productId
-    }
-
-    Object.assign(opts, defaultOpts);
+function HTTPRequest(opts) {
     return new Promise((resolve, reject) => {
         const req = https.request(opts, (res) => {
-
-
             let stream;
             let data = '';
             let enc = res.headers['content-encoding'];
-
             if (enc == 'gzip') {
                 stream = res.pipe(zlib.createGunzip());
             } else {
                 stream = res;
             }
-
             stream.on('data', (d) => {
                 data += d;
             });
@@ -54,28 +44,39 @@ function getStockPromise(productId) {
             stream.on('error', (e) => {
                 reject(e);
             });
-
         });
-
         req.on('timeout', () => {
-            console.log('HTTP request timed out.');
-            resolve({});
+            reject('HTTP Timeout');
         });
 
         req.on('error', (e) => {
             reject(e);
         });
-
         req.end();
     });
 }
 
-function getItemsPromise(cat1, cat2, page) {
+function getStock(productId) {
+    const opts = {
+        path: getStockPrefix + productId
+    }
+    Object.assign(opts, defaultOpts);
+    return HTTPRequest(opts);
+}
+
+async function getItems(items, cat1, cat2, page) {
+    if (page < 0)
+    {
+        return items;
+    }
+
+    console.log(page);
+
     const query = querystring.stringify({
         isInOnlineStoreSearchAssortment: true,
         postalCode: postalCode,
         isInOnlineHomeSearchAssortment: true,
-        size: 30,
+        size: 10,
         page: page,
         categoryLevel1: cat1,
         categoryLevel2: cat2,
@@ -86,84 +87,35 @@ function getItemsPromise(cat1, cat2, page) {
     }
 
     Object.assign(opts, defaultOpts);
-
-    // TODO: This code is the same as getStockPromise, make it a generic function.
-    return new Promise((resolve, reject) => {
-        const req = https.request(opts, (res) => {
-            let stream;
-            let data = '';
-            let enc = res.headers['content-encoding'];
-
-            res.setTimeout(1000, () => {
-                console.log('HTTP request timed out.');
-                resolve({ });
-            });
-
-            if (enc == 'gzip') {
-                stream = res.pipe(zlib.createGunzip());
-            } else {
-                stream = res;
-            }
-
-            stream.on('data', (d) => {
-                data += d;
-            });
-            stream.on('end', () => {
-                resolve(JSON.parse(data));
-            });
-            stream.on('error', (e) => {
-                reject(e);
-            });
-
-        });
-        req.on('error', (e) => {
-            reject(e);
-        });
-
-        req.on('timeout', () => {
-            console.log('HTTP request timed out.');
-            resolve({ });
-        });
-        req.end();
-    });
-}
-
-async function getItems(cat1, cat2) {
-    let items = [];
-    let page = 1;
-    do {
-        console.log('page: ', page);
-        let i = await getItemsPromise(cat1, cat2, page);
+    try {
+        let i = await HTTPRequest(opts);
 
         if (i.metadata == undefined)
-            break;
+            return items;
 
-        page = i.metadata.nextPage;
-        items.push(...i.products);
-    } while (page > 0);
-    return items;
+        let getStockPromises = i.products.map(item => getStock(item.productId));
+        let stock = await Promise.all(getStockPromises);
+        let ids = stock.filter(s => s.stock == unicornLevel).map(i => i.productId);
+        let unicorns = i.products.filter(p => {
+            return ids.indexOf(p.productId) != -1;
+        });
+        items.push(...unicorns);
+
+        return await getItems(items, cat1, cat2, i.metadata.nextPage);
+    } catch(e) {
+        console.error(e);
+    }
 }
 
-itemsMap = {};
+function printResult(res) {
+    if (!res || !res.length)
+    {
+        console.log('Didn\'t find any unicorns this time, good luck next time.');
+        return;
+    }
 
-function getStock(items) {
-    let getStockPromises = items.map(item => getStockPromise(item.productId));
-    items.map(item => {
-        itemsMap[item.productId] = item;
-    });
-    // TODO: Right now we will send all stock (~120 * 15) requests at the same
-    // time. This makes a lot of the requst time out. It would be better to get
-    // the stock for each page before moving on to the next page, this way we
-    // only send 15 stock requests at once.
-    return Promise.all(getStockPromises)
-}
-
-function findUnicorns(stock) {
-    stock.forEach(i => {
-        if (i.stock > 0 && i.stock <= unicornLevel) {
-            p = itemsMap[i.productId];
-            process.stdout.write(`${p.productNameBold}[${p.productNumber}]: ${p.price}kr [${i.stock}]\n`);
-        }
+    res.forEach(i => {
+        process.stdout.write(`${i.productNameBold}[${i.productNumber}]: ${i.price}kr\n`);
     });
 }
 
@@ -174,6 +126,5 @@ if (args.length != 5) {
     process.exit(1);
 }
 
-getItems(categoryLevel1, categoryLevel2)
-    .then(getStock)
-    .then(findUnicorns);
+getItems([], categoryLevel1, categoryLevel2, 1)
+    .then(printResult);
